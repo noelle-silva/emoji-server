@@ -904,6 +904,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     .msg { font-size: 12px; opacity: 0.9; }
     .edit { display: grid; gap: 8px; }
     .edit input[type="text"] { min-width: 0; width: 100%; }
+    textarea.names { width: 100%; min-height: 64px; resize: vertical; padding: 10px 12px; border-radius: 10px; border: 1px solid #4446; background: transparent; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
     .viewer { position: fixed; inset: 0; padding: 24px; background: rgba(0,0,0,0.72); display: none; align-items: center; justify-content: center; z-index: 999; }
     .viewer.on { display: flex; }
     .viewer .box { position: relative; max-width: 96vw; max-height: 92vh; display: grid; gap: 10px; }
@@ -942,6 +943,19 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
         <button class="primary" id="upload">上传</button>
         <button id="refresh">刷新</button>
         <span class="msg" id="status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <div style="display:grid; gap:6px;">
+          <div><b>名称列表</b></div>
+          <div class="msg">一键复制全部文件名（用 <code>|</code> 分隔）。</div>
+        </div>
+        <button id="copyNames" type="button">复制全部文件名</button>
+      </div>
+      <div style="margin-top:10px;">
+        <textarea id="namesBlock" class="names" readonly></textarea>
       </div>
     </div>
 
@@ -1004,6 +1018,34 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     let FILES = [];
     let viewerIndex = -1;
 
+    function renderNamesBlock() {
+      const names = (FILES || []).map(x => x.name || '').filter(Boolean);
+      const text = names.join('|');
+      $('namesBlock').value = text;
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {}
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.top = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
     function viewerIsOpen() {
       return $('viewer').classList.contains('on');
     }
@@ -1047,6 +1089,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       const files = (data && data.files) ? data.files : [];
       const openName = (viewerIndex >= 0 && viewerIndex < FILES.length) ? FILES[viewerIndex].name : '';
       FILES = files;
+      renderNamesBlock();
       if (openName) {
         const ni = FILES.findIndex(x => x.name === openName);
         if (ni >= 0) {
@@ -1192,6 +1235,13 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     $('upload').addEventListener('click', (e) => { e.preventDefault(); upload(); });
     $('refresh').addEventListener('click', (e) => { e.preventDefault(); loadFiles(); });
     $('baseUrl').textContent = publicURL('<filename>');
+    $('copyNames').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const text = $('namesBlock').value || '';
+      if (!text) { setStatus('暂无文件名可复制'); return; }
+      const ok = await copyText(text);
+      setStatus(ok ? '已复制全部文件名' : '复制失败（浏览器权限限制）');
+    });
     $('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) viewerClose(); });
     $('viewerClose').addEventListener('click', (e) => { e.preventDefault(); viewerClose(); });
     $('viewerPrev').addEventListener('click', (e) => { e.preventDefault(); viewerStep(-1); });
