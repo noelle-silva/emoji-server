@@ -58,11 +58,11 @@ func loadConfig(path string) (Config, error) {
 }
 
 type FileInfo struct {
-	Category    string    `json:"category"`
-	Name        string    `json:"name"`
-	Path        string    `json:"path"`
-	Size        int64     `json:"size"`
-	ModTime     time.Time `json:"mod_time"`
+	Category string    `json:"category"`
+	Name     string    `json:"name"`
+	Path     string    `json:"path"`
+	Size     int64     `json:"size"`
+	ModTime  time.Time `json:"mod_time"`
 }
 
 type FileStore struct {
@@ -630,6 +630,15 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/favicon.svg" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write([]byte(faviconSVG))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1243,6 +1252,8 @@ var loginTpl = template.Must(template.New("login").Parse(`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#4f46e5">
   <title>emoji-server 登录</title>
   <style>
     :root { color-scheme: light dark; }
@@ -1283,6 +1294,8 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#4f46e5">
   <title>emoji-server 管理</title>
   <style>
     :root { color-scheme: light dark; }
@@ -1905,6 +1918,30 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
   </script>
 </body>
 </html>`))
+
+const faviconSVG = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="emoji-server">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <radialGradient id="face" cx="35%" cy="30%" r="70%">
+      <stop offset="0" stop-color="#fff7b0"/>
+      <stop offset="0.55" stop-color="#fde047"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="url(#bg)"/>
+  <path d="M40 72c28-34 73-54 120-54 31 0 55 8 72 18" fill="none" stroke="#ffffff" stroke-opacity="0.20" stroke-width="16" stroke-linecap="round"/>
+
+  <circle cx="128" cy="134" r="78" fill="url(#face)"/>
+  <circle cx="102" cy="120" r="10" fill="#111827"/>
+  <circle cx="154" cy="120" r="10" fill="#111827"/>
+  <path d="M96 154c10 18 26 28 32 28s22-10 32-28" fill="none" stroke="#111827" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="164" cy="170" r="10" fill="#fb7185" opacity="0.9"/>
+</svg>`
 
 func renderAdmin(w http.ResponseWriter, cfg Config) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
