@@ -12,12 +12,14 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Config struct {
@@ -56,9 +58,11 @@ func loadConfig(path string) (Config, error) {
 }
 
 type FileInfo struct {
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
+	Name        string    `json:"name"`
+	Size        int64     `json:"size"`
+	ModTime     time.Time `json:"mod_time"`
+	DisplayName string    `json:"display_name,omitempty"`
+	Note        string    `json:"note,omitempty"`
 }
 
 type FileStore struct {
@@ -103,6 +107,118 @@ func (s *FileStore) List(ctx context.Context) ([]FileInfo, error) {
 		return out[i].Name < out[j].Name
 	})
 	return out, nil
+}
+
+type EmojiMeta struct {
+	DisplayName string    `json:"display_name,omitempty"`
+	Note        string    `json:"note,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+type MetaStore struct {
+	mu   sync.Mutex
+	path string
+	m    map[string]EmojiMeta
+}
+
+func NewMetaStore(dataDir string) (*MetaStore, error) {
+	ms := &MetaStore{
+		path: filepath.Join(dataDir, ".emoji-meta.json"),
+		m:    make(map[string]EmojiMeta),
+	}
+	b, err := os.ReadFile(ms.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ms, nil
+		}
+		return nil, err
+	}
+	if len(b) == 0 {
+		return ms, nil
+	}
+	if err := json.Unmarshal(b, &ms.m); err != nil {
+		return nil, err
+	}
+	return ms, nil
+}
+
+func (s *MetaStore) Get(name string) (EmojiMeta, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[name]
+	return v, ok
+}
+
+func (s *MetaStore) Set(name, displayName, note string) error {
+	displayName = strings.TrimSpace(displayName)
+	note = strings.TrimSpace(note)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if displayName == "" && note == "" {
+		delete(s.m, name)
+		return s.saveLocked()
+	}
+	now := time.Now()
+	prev, ok := s.m[name]
+	if !ok {
+		prev.CreatedAt = now
+	}
+	prev.DisplayName = displayName
+	prev.Note = note
+	prev.UpdatedAt = now
+	s.m[name] = prev
+	return s.saveLocked()
+}
+
+func (s *MetaStore) Delete(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[name]; !ok {
+		return nil
+	}
+	delete(s.m, name)
+	return s.saveLocked()
+}
+
+func (s *MetaStore) Rename(oldName, newName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if oldName == newName {
+		return nil
+	}
+	v, ok := s.m[oldName]
+	if !ok {
+		return nil
+	}
+	delete(s.m, oldName)
+	s.m[newName] = v
+	return s.saveLocked()
+}
+
+func (s *MetaStore) saveLocked() error {
+	b, err := json.MarshalIndent(s.m, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".meta-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(b); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return renameOver(tmpName, s.path)
 }
 
 func (s *FileStore) Open(name string) (string, *os.File, error) {
@@ -165,6 +281,57 @@ func (s *FileStore) Delete(name string) error {
 	return os.Remove(filepath.Join(s.dir, safe))
 }
 
+func (s *FileStore) Rename(oldName, newName string) (string, error) {
+	oldSafe, err := sanitizeFilename(oldName)
+	if err != nil {
+		return "", err
+	}
+	newSafe, err := sanitizeFilename(newName)
+	if err != nil {
+		return "", err
+	}
+	if oldSafe == newSafe {
+		return newSafe, nil
+	}
+
+	oldPath := filepath.Join(s.dir, oldSafe)
+	newPath := filepath.Join(s.dir, newSafe)
+
+	if _, err := os.Stat(oldPath); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return "", os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	if err := os.Rename(oldPath, newPath); err == nil {
+		return newSafe, nil
+	}
+
+	if strings.EqualFold(oldSafe, newSafe) {
+		tmp, err := os.CreateTemp(s.dir, ".rename-*")
+		if err != nil {
+			return "", err
+		}
+		tmpName := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+
+		if err := os.Rename(oldPath, tmpName); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmpName, newPath); err != nil {
+			_ = os.Rename(tmpName, oldPath)
+			return "", err
+		}
+		return newSafe, nil
+	}
+
+	return "", errors.New("重命名失败")
+}
+
 func sanitizeFilename(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	name = filepath.Base(name)
@@ -177,30 +344,42 @@ func sanitizeFilename(name string) (string, error) {
 	if strings.HasPrefix(name, ".") {
 		return "", errors.New("不允许隐藏文件名")
 	}
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-			continue
-		}
-		switch r {
-		case '.', '-', '_':
-			b.WriteRune(r)
-		case ' ':
-			b.WriteByte('_')
-		default:
-			b.WriteByte('_')
-		}
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return "", errors.New("文件名不能以点或空格结尾")
 	}
-	out := b.String()
-	if out == "" || out == "." || out == ".." {
-		return "", errors.New("文件名无效")
-	}
-	if len(out) > 200 {
+	if utf8.RuneCountInString(name) > 200 {
 		return "", errors.New("文件名过长")
 	}
-	return out, nil
+	for _, r := range name {
+		if r == 0 || r < 32 {
+			return "", errors.New("文件名包含非法字符")
+		}
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			return "", errors.New("文件名包含非法字符")
+		}
+	}
+	if isWindowsReservedName(name) {
+		return "", errors.New("文件名为系统保留字")
+	}
+	return name, nil
+}
+
+func isWindowsReservedName(name string) bool {
+	base := name
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	base = strings.TrimSpace(base)
+	base = strings.ToUpper(base)
+	switch base {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return true
+	default:
+		return false
+	}
 }
 
 type SessionStore struct {
@@ -291,6 +470,11 @@ func main() {
 		log.Fatalf("初始化资源目录失败：%v", err)
 	}
 
+	meta, err := NewMetaStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("初始化元数据失败：%v", err)
+	}
+
 	sessions := NewSessionStore(12 * time.Hour)
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
@@ -321,7 +505,13 @@ func main() {
 			return
 		}
 		key := parts[2]
+		if v, err := url.PathUnescape(key); err == nil {
+			key = v
+		}
 		name := parts[3]
+		if v, err := url.PathUnescape(name); err == nil {
+			name = v
+		}
 		if key != cfg.PublicKey {
 			http.NotFound(w, r)
 			return
@@ -422,6 +612,12 @@ func main() {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		for i := range files {
+			if m, ok := meta.Get(files[i].Name); ok {
+				files[i].DisplayName = m.DisplayName
+				files[i].Note = m.Note
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"files": files})
 	}))
 
@@ -430,28 +626,124 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
-		if err := r.ParseMultipartForm(8 << 20); err != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
+		if err := r.ParseMultipartForm(16 << 20); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "解析上传失败（文件过大或格式错误）"})
 			return
 		}
-		f, header, err := r.FormFile("file")
-		if err != nil {
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 file"})
 			return
 		}
-		defer f.Close()
-
-		name := strings.TrimSpace(r.FormValue("name"))
-		if name == "" {
-			name = header.Filename
+		customName := strings.TrimSpace(r.FormValue("name"))
+		if len(files) > 1 && customName != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "多文件上传不支持自定义 name"})
+			return
 		}
-		saved, err := store.Save(name, f)
+		saved := make([]string, 0, len(files))
+		for _, header := range files {
+			f, err := header.Open()
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "读取上传文件失败"})
+				return
+			}
+			name := header.Filename
+			if customName != "" {
+				name = customName
+			}
+			out, err := store.Save(name, f)
+			_ = f.Close()
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			saved = append(saved, out)
+		}
+		resp := map[string]any{"names": saved}
+		if len(saved) == 1 {
+			resp["name"] = saved[0]
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
+
+	mux.HandleFunc("/api/admin/meta/set", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			Note        string `json:"note"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "JSON 格式错误"})
+			return
+		}
+		safe, err := sanitizeFilename(req.Name)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": saved})
+		full := filepath.Join(cfg.DataDir, safe)
+		if _, err := os.Stat(full); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "文件不存在"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取文件失败"})
+			return
+		}
+		if err := meta.Set(safe, req.DisplayName, req.Note); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存元数据失败"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	mux.HandleFunc("/api/admin/rename", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			OldName string `json:"old_name"`
+			NewName string `json:"new_name"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "JSON 格式错误"})
+			return
+		}
+		oldSafe, err := sanitizeFilename(req.OldName)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		newSafe, err := sanitizeFilename(req.NewName)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if oldSafe == newSafe {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": newSafe})
+			return
+		}
+		out, err := store.Rename(oldSafe, newSafe)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "文件不存在"})
+				return
+			}
+			if errors.Is(err, os.ErrExist) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "目标文件已存在"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		_ = meta.Rename(oldSafe, out)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": out})
 	}))
 
 	mux.HandleFunc("/api/admin/delete", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
@@ -473,6 +765,9 @@ func main() {
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
+		}
+		if safe, err := sanitizeFilename(req.Name); err == nil {
+			_ = meta.Delete(safe)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
@@ -605,6 +900,8 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     .top { display: grid; gap: 12px; margin-bottom: 16px; }
     .url { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; opacity: 0.9; word-break: break-all; }
     .msg { font-size: 12px; opacity: 0.9; }
+    .edit { display: grid; gap: 8px; }
+    .edit input[type="text"] { min-width: 0; width: 100%; }
   </style>
 </head>
 <body>
@@ -623,12 +920,12 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       <div class="row" style="justify-content: space-between;">
         <div style="display:grid; gap:6px;">
           <div><b>上传</b></div>
-          <div class="msg">支持直接覆盖同名文件。文件名只允许字母数字、点、下划线、短横线。</div>
+          <div class="msg">支持多选上传与覆盖同名文件。文件名支持中文，但不能包含 &lt; &gt; : " / \ | ? *，也不能以点或空格结尾。</div>
         </div>
       </div>
       <div class="row" style="margin-top:10px;">
-        <input id="file" type="file" />
-        <input id="name" type="text" placeholder="可选：自定义文件名（如 party.gif）" />
+        <input id="file" type="file" multiple />
+        <input id="name" type="text" placeholder="可选：自定义文件名（仅单文件，如 过生日.gif）" />
         <button class="primary" id="upload">上传</button>
         <button id="refresh">刷新</button>
         <span class="msg" id="status"></span>
@@ -652,6 +949,11 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     }
 
     function publicURL(name) {
+      const base = guessBaseURL();
+      return base + '/e/' + CFG.publicKey + '/' + name;
+    }
+
+    function publicURLFetch(name) {
       const base = guessBaseURL();
       return base + '/e/' + encodeURIComponent(CFG.publicKey) + '/' + encodeURIComponent(name);
     }
@@ -693,14 +995,49 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
         const img = document.createElement('img');
         img.loading = 'lazy';
         img.alt = f.name;
-        img.src = publicURL(f.name);
+        img.src = publicURLFetch(f.name);
         thumb.appendChild(img);
 
         const meta = document.createElement('div');
         meta.className = 'meta';
         const url = publicURL(f.name);
-        meta.innerHTML = '<div><b>' + escapeHTML(f.name) + '</b></div>' +
-          '<div class="url">' + escapeHTML(url) + '</div>';
+
+        const title = document.createElement('div');
+        const b = document.createElement('b');
+        b.textContent = f.name;
+        title.appendChild(b);
+
+        const urlDiv = document.createElement('div');
+        urlDiv.className = 'url';
+        urlDiv.textContent = url;
+
+        const edit = document.createElement('div');
+        edit.className = 'edit';
+        const newName = document.createElement('input');
+        newName.type = 'text';
+        newName.placeholder = '新文件名（如 过生日.gif）';
+        newName.value = f.name;
+        const renameRow = document.createElement('div');
+        renameRow.className = 'row';
+        const renameBtn = document.createElement('button');
+        renameBtn.textContent = '重命名';
+        renameBtn.onclick = async () => {
+          const v = (newName.value || '').trim();
+          if (!v) { setStatus('请输入新文件名'); return; }
+          if (v === f.name) { setStatus('文件名未变化'); return; }
+          try {
+            await api('/api/admin/rename', { method: 'POST', body: JSON.stringify({ old_name: f.name, new_name: v }) });
+            await loadFiles();
+            setStatus('已重命名：' + f.name + ' -> ' + v);
+          } catch (e) { setStatus('重命名失败：' + e.message); }
+        };
+        renameRow.appendChild(renameBtn);
+        edit.appendChild(newName);
+        edit.appendChild(renameRow);
+
+        meta.appendChild(title);
+        meta.appendChild(urlDiv);
+        meta.appendChild(edit);
 
         const row = document.createElement('div');
         row.className = 'row';
@@ -737,12 +1074,13 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     }
 
     async function upload() {
-      const file = $('file').files[0];
-      if (!file) { setStatus('请选择文件'); return; }
+      const files = Array.from($('file').files || []);
+      if (!files.length) { setStatus('请选择文件'); return; }
       const name = $('name').value.trim();
+      if (files.length > 1 && name) { setStatus('多选上传不支持自定义文件名'); return; }
 
       const form = new FormData();
-      form.append('file', file);
+      for (const f of files) form.append('file', f);
       if (name) form.append('name', name);
 
       setStatus('上传中...');
@@ -758,12 +1096,24 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       $('file').value = '';
       $('name').value = '';
       await loadFiles();
-      setStatus('已上传：' + (data && data.name ? data.name : ''));
+      const names = (data && data.names) ? data.names : (data && data.name ? [data.name] : []);
+      setStatus('已上传：' + names.join(', '));
     }
 
+    $('file').addEventListener('change', () => {
+      const n = ($('file').files || []).length;
+      if (n > 1) {
+        $('name').value = '';
+        $('name').disabled = true;
+        $('name').placeholder = '多选时不支持自定义文件名';
+      } else {
+        $('name').disabled = false;
+        $('name').placeholder = '可选：自定义文件名（仅单文件，如 过生日.gif）';
+      }
+    });
     $('upload').addEventListener('click', (e) => { e.preventDefault(); upload(); });
     $('refresh').addEventListener('click', (e) => { e.preventDefault(); loadFiles(); });
-    $('baseUrl').textContent = publicURL('<filename>').replace(/%3Cfilename%3E/, '<filename>');
+    $('baseUrl').textContent = publicURL('<filename>');
     loadFiles().catch(e => setStatus('加载失败：' + e.message));
   </script>
 </body>
