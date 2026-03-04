@@ -497,45 +497,6 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Public emoji access: /e/{publicKey}/{filename}
-	mux.HandleFunc("/e/", func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(r.URL.Path, "/")
-		if len(parts) != 4 || parts[1] != "e" {
-			http.NotFound(w, r)
-			return
-		}
-		key := parts[2]
-		if v, err := url.PathUnescape(key); err == nil {
-			key = v
-		}
-		name := parts[3]
-		if v, err := url.PathUnescape(name); err == nil {
-			name = v
-		}
-		if key != cfg.PublicKey {
-			http.NotFound(w, r)
-			return
-		}
-		full, f, err := store.Open(name)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		defer f.Close()
-
-		stat, err := f.Stat()
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-
-		ext := strings.ToLower(filepath.Ext(full))
-		if ct := mime.TypeByExtension(ext); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
-		http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
-	})
-
 	// Admin pages
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin" {
@@ -772,9 +733,17 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
 
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/pw=") {
+			servePublic(w, r, cfg.PublicKey, store)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           withLogging(mux),
+		Handler:           withLogging(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -784,8 +753,58 @@ func main() {
 	}
 	log.Printf("emoji-server listening on %s", ln.Addr().String())
 	log.Printf("admin: http://%s/admin", hostForLog(ln.Addr()))
-	log.Printf("public: http://%s/e/%s/<filename>", hostForLog(ln.Addr()), cfg.PublicKey)
+	log.Printf("public: http://%s/pw=%s/<filename>", hostForLog(ln.Addr()), cfg.PublicKey)
 	log.Fatal(srv.Serve(ln))
+}
+
+func servePublic(w http.ResponseWriter, r *http.Request, publicKey string, store *FileStore) {
+	p := strings.TrimPrefix(r.URL.Path, "/")
+	i := strings.IndexByte(p, '/')
+	if i < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	keySeg := p[:i]
+	nameSeg := p[i+1:]
+	if keySeg == "" || nameSeg == "" || strings.Contains(nameSeg, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	if v, err := url.PathUnescape(keySeg); err == nil {
+		keySeg = v
+	}
+	if v, err := url.PathUnescape(nameSeg); err == nil {
+		nameSeg = v
+	}
+	if !strings.HasPrefix(keySeg, "pw=") {
+		http.NotFound(w, r)
+		return
+	}
+	key := strings.TrimPrefix(keySeg, "pw=")
+	if key != publicKey {
+		http.NotFound(w, r)
+		return
+	}
+
+	full, f, err := store.Open(nameSeg)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(full))
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }
 
 func hostForLog(addr net.Addr) string {
@@ -991,12 +1010,12 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
 
     function publicURL(name) {
       const base = guessBaseURL();
-      return base + '/e/' + CFG.publicKey + '/' + name;
+      return base + '/pw=' + CFG.publicKey + '/' + name;
     }
 
     function publicURLFetch(name) {
       const base = guessBaseURL();
-      return base + '/e/' + encodeURIComponent(CFG.publicKey) + '/' + encodeURIComponent(name);
+      return base + '/pw=' + encodeURIComponent(CFG.publicKey) + '/' + encodeURIComponent(name);
     }
 
     async function api(path, opts) {

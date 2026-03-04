@@ -23,6 +23,6 @@
 
 资源文件名为 `party.gif`，则外部访问：
 
-- `http://localhost:8080/e/<public_key>/party.gif`
+- `http://localhost:8080/pw=<public_key>/party.gif`
 
 （UI 中也会直接显示可复制的 URL）
