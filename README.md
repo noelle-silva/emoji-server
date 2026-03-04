@@ -6,6 +6,7 @@
 - 管理 UI：用 `ui_key` 登录，多选上传/删除资源，支持重命名文件
 - 资源存储：本地文件夹（默认 `./emojis`）
   - 文件名支持中文（但不能包含 Windows 不允许的字符，如 `< > : " / \ | ? *`）
+  - 资源按“分类文件夹”组织：`./emojis/<分类>/<文件名>`
 
 ## 运行
 
@@ -21,8 +22,10 @@
 
 ## 外部访问 URL（示例）
 
-资源文件名为 `party.gif`，则外部访问：
+资源存储结构为：`./emojis/<分类>/<文件名>`。
 
-- `http://localhost:8080/pw=<public_key>/party.gif`
+例如分类为 `动图`，文件名为 `party.gif`，则外部访问：
+
+- `http://localhost:8080/pw=<public_key>/动图/party.gif`
 
 （UI 中也会直接显示可复制的 URL）
