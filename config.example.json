@@ -1,0 +1,8 @@
+{
+  "listen_addr": ":8080",
+  "data_dir": "./emojis",
+  "public_key": "CHANGE_ME_PUBLIC_KEY",
+  "ui_key": "CHANGE_ME_UI_KEY",
+  "base_url": ""
+}
+
