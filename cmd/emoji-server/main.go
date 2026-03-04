@@ -842,6 +842,7 @@ var loginTpl = template.Must(template.New("login").Parse(`<!doctype html>
   <title>emoji-server 登录</title>
   <style>
     :root { color-scheme: light dark; }
+    *, *::before, *::after { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; }
     .card { max-width: 460px; margin: 8vh auto 0; padding: 18px; border: 1px solid #4444; border-radius: 12px; }
     h1 { font-size: 18px; margin: 0 0 12px; }
@@ -881,6 +882,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
   <title>emoji-server 管理</title>
   <style>
     :root { color-scheme: light dark; }
+    *, *::before, *::after { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 18px; }
     header { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 16px; }
     h1 { font-size: 18px; margin: 0; }
