@@ -892,7 +892,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
     .item { display: grid; gap: 8px; }
     .thumb { height: 140px; display: grid; place-items: center; border-radius: 10px; overflow: hidden; border: 1px solid #4444; background: #1111; }
-    .thumb img { max-width: 100%; max-height: 100%; image-rendering: auto; }
+    .thumb img { max-width: 100%; max-height: 100%; image-rendering: auto; cursor: zoom-in; }
     .meta { font-size: 12px; opacity: 0.85; word-break: break-all; }
     input[type="text"] { padding: 9px 10px; border-radius: 10px; border: 1px solid #4446; background: transparent; min-width: 240px; }
     input[type="file"] { max-width: 360px; }
@@ -904,6 +904,17 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     .msg { font-size: 12px; opacity: 0.9; }
     .edit { display: grid; gap: 8px; }
     .edit input[type="text"] { min-width: 0; width: 100%; }
+    .viewer { position: fixed; inset: 0; padding: 24px; background: rgba(0,0,0,0.72); display: none; align-items: center; justify-content: center; z-index: 999; }
+    .viewer.on { display: flex; }
+    .viewer .box { position: relative; max-width: 96vw; max-height: 92vh; display: grid; gap: 10px; }
+    .viewer .imgwrap { position: relative; display: grid; place-items: center; }
+    .viewer img { max-width: 96vw; max-height: 80vh; border-radius: 12px; border: 1px solid #fff2; background: #000; }
+    .viewer .cap { font-size: 12px; opacity: 0.92; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .viewer .cap .name { word-break: break-all; }
+    .viewer .cap button { border: 1px solid #fff3; background: #0006; color: inherit; }
+    .viewer .nav { position: absolute; top: 50%; transform: translateY(-50%); padding: 10px 12px; border-radius: 999px; border: 1px solid #fff3; background: #0006; color: inherit; cursor: pointer; }
+    .viewer .nav.left { left: 10px; }
+    .viewer .nav.right { right: 10px; }
   </style>
 </head>
 <body>
@@ -935,6 +946,20 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     </div>
 
     <div class="grid" id="grid"></div>
+  </div>
+
+  <div id="viewer" class="viewer" aria-hidden="true">
+    <div class="box">
+      <div class="cap">
+        <div class="name" id="viewerName"></div>
+        <button id="viewerClose" type="button">关闭</button>
+      </div>
+      <div class="imgwrap">
+        <button class="nav left" id="viewerPrev" type="button">←</button>
+        <img id="viewerImg" alt="">
+        <button class="nav right" id="viewerNext" type="button">→</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -976,19 +1001,69 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       $('status').textContent = msg || '';
     }
 
+    let FILES = [];
+    let viewerIndex = -1;
+
+    function viewerIsOpen() {
+      return $('viewer').classList.contains('on');
+    }
+
+    function viewerRender() {
+      if (viewerIndex < 0 || viewerIndex >= FILES.length) return;
+      const f = FILES[viewerIndex];
+      $('viewerName').textContent = f.name;
+      const img = $('viewerImg');
+      img.alt = f.name;
+      img.src = publicURLFetch(f.name);
+    }
+
+    function viewerOpen(i) {
+      if (!FILES.length) return;
+      viewerIndex = (i % FILES.length + FILES.length) % FILES.length;
+      viewerRender();
+      $('viewer').classList.add('on');
+      $('viewer').setAttribute('aria-hidden', 'false');
+    }
+
+    function viewerClose() {
+      $('viewer').classList.remove('on');
+      $('viewer').setAttribute('aria-hidden', 'true');
+      $('viewerImg').src = '';
+      viewerIndex = -1;
+    }
+
+    function viewerStep(delta) {
+      if (!FILES.length) return;
+      if (viewerIndex < 0) viewerIndex = 0;
+      viewerIndex = (viewerIndex + delta + FILES.length) % FILES.length;
+      viewerRender();
+    }
+
     async function loadFiles() {
       setStatus('加载中...');
       const data = await api('/api/admin/files', { method: 'GET', headers: {} });
       const grid = $('grid');
       grid.innerHTML = '';
       const files = (data && data.files) ? data.files : [];
+      const openName = (viewerIndex >= 0 && viewerIndex < FILES.length) ? FILES[viewerIndex].name : '';
+      FILES = files;
+      if (openName) {
+        const ni = FILES.findIndex(x => x.name === openName);
+        if (ni >= 0) {
+          viewerIndex = ni;
+          if (viewerIsOpen()) viewerRender();
+        } else if (viewerIsOpen()) {
+          viewerClose();
+        }
+      }
       if (!files.length) {
         const empty = document.createElement('div');
         empty.className = 'card';
         empty.textContent = '暂无资源。';
         grid.appendChild(empty);
       }
-      for (const f of files) {
+      for (let idx = 0; idx < files.length; idx++) {
+        const f = files[idx];
         const card = document.createElement('div');
         card.className = 'card item';
 
@@ -998,6 +1073,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
         img.loading = 'lazy';
         img.alt = f.name;
         img.src = publicURLFetch(f.name);
+        img.onclick = () => viewerOpen(idx);
         thumb.appendChild(img);
 
         const meta = document.createElement('div');
@@ -1116,6 +1192,16 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     $('upload').addEventListener('click', (e) => { e.preventDefault(); upload(); });
     $('refresh').addEventListener('click', (e) => { e.preventDefault(); loadFiles(); });
     $('baseUrl').textContent = publicURL('<filename>');
+    $('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) viewerClose(); });
+    $('viewerClose').addEventListener('click', (e) => { e.preventDefault(); viewerClose(); });
+    $('viewerPrev').addEventListener('click', (e) => { e.preventDefault(); viewerStep(-1); });
+    $('viewerNext').addEventListener('click', (e) => { e.preventDefault(); viewerStep(1); });
+    document.addEventListener('keydown', (e) => {
+      if (!viewerIsOpen()) return;
+      if (e.key === 'Escape') viewerClose();
+      if (e.key === 'ArrowLeft') viewerStep(-1);
+      if (e.key === 'ArrowRight') viewerStep(1);
+    });
     loadFiles().catch(e => setStatus('加载失败：' + e.message));
   </script>
 </body>
