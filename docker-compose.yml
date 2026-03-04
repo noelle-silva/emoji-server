@@ -3,6 +3,7 @@ services:
     build:
       context: .
     working_dir: /app
+    user: "0:0"
     ports:
       # 端口需与 ./config.json 里的 listen_addr 保持一致
       - "9334:9334"
