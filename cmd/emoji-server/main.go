@@ -63,8 +63,6 @@ type FileInfo struct {
 	Path        string    `json:"path"`
 	Size        int64     `json:"size"`
 	ModTime     time.Time `json:"mod_time"`
-	DisplayName string    `json:"display_name,omitempty"`
-	Note        string    `json:"note,omitempty"`
 }
 
 type FileStore struct {
@@ -279,160 +277,6 @@ func (s *FileStore) List(ctx context.Context) ([]FileInfo, error) {
 		return out[i].Category < out[j].Category
 	})
 	return out, nil
-}
-
-type EmojiMeta struct {
-	DisplayName string    `json:"display_name,omitempty"`
-	Note        string    `json:"note,omitempty"`
-	CreatedAt   time.Time `json:"created_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
-}
-
-type MetaStore struct {
-	mu   sync.Mutex
-	path string
-	m    map[string]EmojiMeta
-}
-
-func NewMetaStore(dataDir string) (*MetaStore, error) {
-	ms := &MetaStore{
-		path: filepath.Join(dataDir, ".emoji-meta.json"),
-		m:    make(map[string]EmojiMeta),
-	}
-	b, err := os.ReadFile(ms.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ms, nil
-		}
-		return nil, err
-	}
-	if len(b) == 0 {
-		return ms, nil
-	}
-	if err := json.Unmarshal(b, &ms.m); err != nil {
-		return nil, err
-	}
-	return ms, nil
-}
-
-func (s *MetaStore) Get(name string) (EmojiMeta, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[name]
-	return v, ok
-}
-
-func (s *MetaStore) Set(name, displayName, note string) error {
-	displayName = strings.TrimSpace(displayName)
-	note = strings.TrimSpace(note)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if displayName == "" && note == "" {
-		delete(s.m, name)
-		return s.saveLocked()
-	}
-	now := time.Now()
-	prev, ok := s.m[name]
-	if !ok {
-		prev.CreatedAt = now
-	}
-	prev.DisplayName = displayName
-	prev.Note = note
-	prev.UpdatedAt = now
-	s.m[name] = prev
-	return s.saveLocked()
-}
-
-func (s *MetaStore) Delete(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.m[name]; !ok {
-		return nil
-	}
-	delete(s.m, name)
-	return s.saveLocked()
-}
-
-func (s *MetaStore) Rename(oldName, newName string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if oldName == newName {
-		return nil
-	}
-	v, ok := s.m[oldName]
-	if !ok {
-		return nil
-	}
-	delete(s.m, oldName)
-	s.m[newName] = v
-	return s.saveLocked()
-}
-
-func (s *MetaStore) RenameCategory(oldCategory, newCategory string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if oldCategory == newCategory {
-		return nil
-	}
-	oldPrefix := oldCategory + "/"
-	newPrefix := newCategory + "/"
-	changed := false
-	next := make(map[string]EmojiMeta, len(s.m))
-	for k, v := range s.m {
-		if strings.Contains(k, "/") {
-			if strings.HasPrefix(k, oldPrefix) {
-				next[newPrefix+strings.TrimPrefix(k, oldPrefix)] = v
-				changed = true
-				continue
-			}
-		}
-		next[k] = v
-	}
-	if !changed {
-		return nil
-	}
-	s.m = next
-	return s.saveLocked()
-}
-
-func (s *MetaStore) MigrateRootKeyToCategory(filename, category string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if strings.Contains(filename, "/") {
-		return nil
-	}
-	v, ok := s.m[filename]
-	if !ok {
-		return nil
-	}
-	delete(s.m, filename)
-	s.m[category+"/"+filename] = v
-	return s.saveLocked()
-}
-
-func (s *MetaStore) saveLocked() error {
-	b, err := json.MarshalIndent(s.m, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".meta-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-	if _, err := tmp.Write(b); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return renameOver(tmpName, s.path)
 }
 
 func (s *FileStore) Open(category, name string) (string, *os.File, error) {
@@ -729,11 +573,7 @@ func main() {
 		log.Fatalf("初始化资源目录失败：%v", err)
 	}
 
-	meta, err := NewMetaStore(cfg.DataDir)
-	if err != nil {
-		log.Fatalf("初始化元数据失败：%v", err)
-	}
-	migrateRootFiles(store, meta, "未分类")
+	migrateRootFiles(store, "未分类")
 
 	sessions := NewSessionStore(12 * time.Hour)
 	go func() {
@@ -892,7 +732,6 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		_ = meta.RenameCategory(oldSafe, out)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": out})
 	}))
 
@@ -946,12 +785,6 @@ func main() {
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
-		}
-		for i := range files {
-			if m, ok := meta.Get(files[i].Path); ok {
-				files[i].DisplayName = m.DisplayName
-				files[i].Note = m.Note
-			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"files": files})
 	}))
@@ -1007,45 +840,6 @@ func main() {
 		writeJSON(w, http.StatusOK, resp)
 	}))
 
-	mux.HandleFunc("/api/admin/meta/set", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			Path        string `json:"path"`
-			DisplayName string `json:"display_name"`
-			Note        string `json:"note"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "JSON 格式错误"})
-			return
-		}
-		cat, name, err := splitRelPath(req.Path)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		_, f, err := store.Open(cat, name)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"error": "文件不存在"})
-				return
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		_ = f.Close()
-		path, _ := sanitizePathSegment(cat)
-		file, _ := sanitizePathSegment(name)
-		rel := path + "/" + file
-		if err := meta.Set(rel, req.DisplayName, req.Note); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存元数据失败"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	}))
-
 	mux.HandleFunc("/api/admin/file/rename", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1094,7 +888,6 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		_ = meta.Rename(oldRel, out)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": out})
 	}))
 
@@ -1129,7 +922,6 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		_ = meta.Delete(catSafe + "/" + nameSafe)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
 
@@ -1157,7 +949,7 @@ func main() {
 	log.Fatal(srv.Serve(ln))
 }
 
-func migrateRootFiles(store *FileStore, meta *MetaStore, defaultCategory string) {
+func migrateRootFiles(store *FileStore, defaultCategory string) {
 	entries, err := os.ReadDir(store.dir)
 	if err != nil {
 		return
@@ -1169,9 +961,6 @@ func migrateRootFiles(store *FileStore, meta *MetaStore, defaultCategory string)
 		}
 		name := e.Name()
 		if name == "" || strings.HasPrefix(name, ".") {
-			continue
-		}
-		if name == ".emoji-meta.json" {
 			continue
 		}
 		if _, err := sanitizePathSegment(name); err != nil {
@@ -1195,9 +984,6 @@ func migrateRootFiles(store *FileStore, meta *MetaStore, defaultCategory string)
 		if err := os.Rename(src, dst); err != nil {
 			log.Printf("migrate root file failed: %s -> %s: %v", src, dst, err)
 			continue
-		}
-		if meta != nil {
-			_ = meta.MigrateRootKeyToCategory(name, catSafe)
 		}
 	}
 }
