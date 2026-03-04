@@ -1,0 +1,14 @@
+services:
+  emoji-server:
+    build:
+      context: .
+    working_dir: /app
+    ports:
+      # 端口需与 ./config.json 里的 listen_addr 保持一致
+      - "9334:9334"
+    volumes:
+      # 只挂载运行必需内容；尤其是 config.json（避免写进镜像）
+      - ./config.json:/app/config.json:ro
+      # 数据目录：与 config.json 的 data_dir=./emojis 对应
+      - ./emojis:/app/emojis
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+.git
+.gitignore
+tmp
+emojis
+config.json
+emoji-server.exe
+*.exe
+*.log
