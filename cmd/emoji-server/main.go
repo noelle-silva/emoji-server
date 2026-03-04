@@ -418,6 +418,68 @@ func (s *FileStore) Rename(oldCategory, oldName, newCategory, newName string) (s
 	return "", errors.New("重命名失败")
 }
 
+func (s *FileStore) Copy(fromCategory, fromName, toCategory, toName string) (string, error) {
+	fromCatSafe, err := sanitizePathSegment(fromCategory)
+	if err != nil {
+		return "", err
+	}
+	fromNameSafe, err := sanitizePathSegment(fromName)
+	if err != nil {
+		return "", err
+	}
+	toCatSafe, err := sanitizePathSegment(toCategory)
+	if err != nil {
+		return "", err
+	}
+	toNameSafe, err := sanitizePathSegment(toName)
+	if err != nil {
+		return "", err
+	}
+
+	srcPath := filepath.Join(s.dir, fromCatSafe, fromNameSafe)
+	dstDir := filepath.Join(s.dir, toCatSafe)
+	dstPath := filepath.Join(dstDir, toNameSafe)
+
+	if _, err := os.Stat(srcPath); err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(dstPath); err == nil {
+		return "", os.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return "", err
+	}
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	tmp, err := os.CreateTemp(dstDir, ".copy-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := io.Copy(tmp, src); err != nil {
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpName, dstPath); err != nil {
+		return "", err
+	}
+	return toCatSafe + "/" + toNameSafe, nil
+}
+
 func sanitizePathSegment(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	name = filepath.Base(name)
@@ -466,23 +528,6 @@ func isWindowsReservedName(name string) bool {
 	default:
 		return false
 	}
-}
-
-func splitRelPath(p string) (string, string, error) {
-	p = strings.TrimSpace(p)
-	p = strings.ReplaceAll(p, "\\", "/")
-	p = strings.TrimPrefix(p, "/")
-	p = strings.TrimSuffix(p, "/")
-	parts := strings.Split(p, "/")
-	if len(parts) != 2 {
-		return "", "", errors.New("路径格式必须为：分类/文件名")
-	}
-	cat := strings.TrimSpace(parts[0])
-	name := strings.TrimSpace(parts[1])
-	if cat == "" || name == "" {
-		return "", "", errors.New("路径格式必须为：分类/文件名")
-	}
-	return cat, name, nil
 }
 
 type SessionStore struct {
@@ -891,6 +936,104 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": out})
 	}))
 
+	mux.HandleFunc("/api/admin/file/move", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			FromCategory string `json:"from_category"`
+			Name         string `json:"name"`
+			ToCategory   string `json:"to_category"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "JSON 格式错误"})
+			return
+		}
+		fromCat, err := sanitizePathSegment(req.FromCategory)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		toCat, err := sanitizePathSegment(req.ToCategory)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		name, err := sanitizePathSegment(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if fromCat == toCat {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": fromCat + "/" + name})
+			return
+		}
+		out, err := store.Rename(fromCat, name, toCat, name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "文件不存在"})
+				return
+			}
+			if errors.Is(err, os.ErrExist) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "目标文件已存在"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": out})
+	}))
+
+	mux.HandleFunc("/api/admin/file/copy", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			FromCategory string `json:"from_category"`
+			Name         string `json:"name"`
+			ToCategory   string `json:"to_category"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "JSON 格式错误"})
+			return
+		}
+		fromCat, err := sanitizePathSegment(req.FromCategory)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		toCat, err := sanitizePathSegment(req.ToCategory)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		name, err := sanitizePathSegment(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if fromCat == toCat {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "同文件夹内复制需要改名，当前不支持"})
+			return
+		}
+		out, err := store.Copy(fromCat, name, toCat, name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "文件不存在"})
+				return
+			}
+			if errors.Is(err, os.ErrExist) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "目标文件已存在"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": out})
+	}))
+
 	mux.HandleFunc("/api/admin/file/delete", requireAdmin(sessions, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1166,6 +1309,10 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     .edit { display: grid; gap: 8px; }
     .edit input[type="text"] { min-width: 0; width: 100%; }
     textarea.names { width: 100%; min-height: 64px; resize: vertical; padding: 10px 12px; border-radius: 10px; border: 1px solid #4446; background: transparent; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    select { padding: 9px 10px; border-radius: 10px; border: 1px solid #4446; background: transparent; min-width: 240px; }
+    .modal { position: fixed; inset: 0; padding: 24px; background: rgba(0,0,0,0.62); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal.on { display: flex; }
+    .modal .panel { width: min(560px, 96vw); }
     .viewer { position: fixed; inset: 0; padding: 24px; background: rgba(0,0,0,0.72); display: none; align-items: center; justify-content: center; z-index: 999; }
     .viewer.on { display: flex; }
     .viewer .box { position: relative; max-width: 96vw; max-height: 92vh; display: grid; gap: 10px; }
@@ -1253,6 +1400,21 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     </div>
   </div>
 
+  <div id="transfer" class="modal" aria-hidden="true">
+    <div class="card panel">
+      <div class="row" style="justify-content: space-between;">
+        <div><b id="transferTitle">移动/复制</b></div>
+        <button id="transferClose" type="button">关闭</button>
+      </div>
+      <div class="msg" style="margin-top:8px;">文件：<span class="url" id="transferFile"></span></div>
+      <div class="row" style="margin-top:10px;">
+        <select id="transferTarget"></select>
+        <button class="primary" id="transferOk" type="button">确定</button>
+      </div>
+      <div class="msg" style="margin-top:8px;">提示：不会覆盖同名文件。</div>
+    </div>
+  </div>
+
   <script>
     const CFG = {
       publicKey: {{.PublicKeyJSON}},
@@ -1317,6 +1479,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     let CATEGORIES = [];
     let FILES = [];
     let viewerIndex = -1;
+    let transferState = null;
 
     function renderNamesBlock() {
       const names = (FILES || []).map(x => x.name || '').filter(Boolean);
@@ -1381,6 +1544,43 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       viewerRender();
     }
 
+    async function ensureCategories() {
+      if (CATEGORIES && CATEGORIES.length) return CATEGORIES;
+      const data = await api('/api/admin/categories', { method: 'GET', headers: {} });
+      CATEGORIES = (data && data.categories) ? data.categories : [];
+      return CATEGORIES;
+    }
+
+    async function openTransfer(action, f) {
+      const fromCat = currentCategory();
+      if (!fromCat) { setStatus('请先进入一个文件夹'); return; }
+      const cats = await ensureCategories();
+      const targets = cats.filter(x => x !== fromCat);
+      if (!targets.length) { setStatus('没有可选目标文件夹'); return; }
+
+      transferState = { action, fromCat, name: f.name };
+      $('transferTitle').textContent = action === 'move' ? '移动' : '复制';
+      $('transferFile').textContent = f.name;
+
+      const sel = $('transferTarget');
+      sel.innerHTML = '';
+      for (const c of targets) {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        sel.appendChild(opt);
+      }
+
+      $('transfer').classList.add('on');
+      $('transfer').setAttribute('aria-hidden', 'false');
+    }
+
+    function closeTransfer() {
+      $('transfer').classList.remove('on');
+      $('transfer').setAttribute('aria-hidden', 'true');
+      transferState = null;
+    }
+
     function applyView() {
       const cat = currentCategory();
       const inFolder = !!cat;
@@ -1391,6 +1591,7 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
       $('crumb').textContent = inFolder ? cat : '文件夹';
       $('currentCat').textContent = inFolder ? cat : '';
       if (!inFolder) {
+        if ($('transfer').classList.contains('on')) closeTransfer();
         if (viewerIsOpen()) viewerClose();
         FILES = [];
         viewerIndex = -1;
@@ -1566,7 +1767,19 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
             setStatus('已删除：' + f.name);
           } catch (e) { setStatus('删除失败：' + e.message); }
         };
+        const moveBtn = document.createElement('button');
+        moveBtn.textContent = '移动';
+        moveBtn.onclick = async () => {
+          try { await openTransfer('move', f); } catch (e) { setStatus('加载文件夹失败：' + e.message); }
+        };
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = '复制';
+        copyBtn.onclick = async () => {
+          try { await openTransfer('copy', f); } catch (e) { setStatus('加载文件夹失败：' + e.message); }
+        };
         row.appendChild(copy);
+        row.appendChild(moveBtn);
+        row.appendChild(copyBtn);
         row.appendChild(del);
 
         card.appendChild(thumb);
@@ -1647,7 +1860,34 @@ var adminTpl = template.Must(template.New("admin").Parse(`<!doctype html>
     $('viewerClose').addEventListener('click', (e) => { e.preventDefault(); viewerClose(); });
     $('viewerPrev').addEventListener('click', (e) => { e.preventDefault(); viewerStep(-1); });
     $('viewerNext').addEventListener('click', (e) => { e.preventDefault(); viewerStep(1); });
+    $('transfer').addEventListener('click', (e) => { if (e.target === $('transfer')) closeTransfer(); });
+    $('transferClose').addEventListener('click', (e) => { e.preventDefault(); closeTransfer(); });
+    $('transferOk').addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (!transferState) return;
+      const toCat = ($('transferTarget').value || '').trim();
+      if (!toCat) { setStatus('请选择目标文件夹'); return; }
+      const payload = { from_category: transferState.fromCat, name: transferState.name, to_category: toCat };
+      try {
+        if (transferState.action === 'move') {
+          await api('/api/admin/file/move', { method: 'POST', body: JSON.stringify(payload) });
+          closeTransfer();
+          await loadFiles(transferState.fromCat);
+          setStatus('已移动：' + transferState.name + ' -> ' + toCat);
+        } else {
+          await api('/api/admin/file/copy', { method: 'POST', body: JSON.stringify(payload) });
+          closeTransfer();
+          setStatus('已复制：' + transferState.name + ' -> ' + toCat);
+        }
+      } catch (err) {
+        setStatus((transferState.action === 'move' ? '移动失败：' : '复制失败：') + err.message);
+      }
+    });
     document.addEventListener('keydown', (e) => {
+      if ($('transfer').classList.contains('on') && e.key === 'Escape') {
+        closeTransfer();
+        return;
+      }
       if (!viewerIsOpen()) return;
       if (e.key === 'Escape') viewerClose();
       if (e.key === 'ArrowLeft') viewerStep(-1);
